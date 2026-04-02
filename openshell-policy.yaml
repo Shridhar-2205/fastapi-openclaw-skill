@@ -8,10 +8,14 @@
 # sections (filesystem_policy, landlock, process) must be included.
 # Ref: https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
 #
-# We omit `protocol: rest` so the proxy uses TCP passthrough instead of
-# L7 HTTP inspection. The sandbox http_proxy uses FORWARD mode, but L7
-# rules require CONNECT tunneling — omitting `protocol` avoids the
-# "endpoint has L7 rules; use CONNECT" denial.
+# Key details:
+#   - `allowed_ips` is required because host.docker.internal resolves to a
+#     private IP (192.168.65.0/24 on Docker Desktop). The proxy blocks
+#     private/RFC1918 IPs by default as SSRF protection.
+#     Ref: https://github.com/NVIDIA/OpenShell/tree/main/examples/private-ip-routing
+#   - `protocol` is omitted so the proxy uses TCP passthrough. L7 inspection
+#     (`protocol: rest`) requires CONNECT tunneling, but the sandbox http_proxy
+#     uses FORWARD mode which is incompatible.
 
 version: 1
 
@@ -35,5 +39,7 @@ network_policies:
         port: 8000
         tls: skip
         enforcement: enforce
+        allowed_ips:
+          - "192.168.65.0/24"
     binaries:
       - { path: /** }
