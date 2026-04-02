@@ -1,16 +1,108 @@
 # FastAPI Skill in OpenShell Sandbox
 
-Connect a Python skill inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
-sandbox to a FastAPI app running on the host. No LLM required — test the
-skill directly with `python3` and `curl` from inside the sandbox.
+> **EXPERIMENTAL** — This example is a work-in-progress and may not be
+> perfect. It has been tested **only with direct `python3` / `curl`
+> invocation** (no LLM). The OpenClaw agent + LLM path (gateway →
+> bash tool → skill) has **NOT been tested**. If you configure an LLM
+> provider via `openclaw onboard`, behavior may differ from what is
+> documented here. Use at your own risk and expect rough edges.
+
+## What This Example Does
+
+This example demonstrates how an [OpenClaw](https://github.com/openclaw/openclaw)
+agent skill running inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
+sandbox can securely call a **FastAPI application hosted on your machine**.
+
+- **`app.py`** is a simple FastAPI server that runs on the **host machine**
+  (outside Docker) and exposes REST endpoints (`/hi`, `/hello/{name}`,
+  `/foo`, `/bar`).
+- **`skill/main.py`** is a Python skill that lives **inside the OpenShell
+  sandbox** (a locked-down Docker container). It provides a `run()` function
+  that makes HTTP requests to the FastAPI app.
+- The skill reaches the host through Docker's **`host.docker.internal`**
+  hostname, which resolves to the host's private IP (`192.168.65.254` on
+  Docker Desktop).
+
+## How the Connection Works
+
+OpenShell sandboxes block **all outbound network traffic by default**. To
+allow the skill to talk to the host:
+
+1. A **network policy** (`openshell-policy.yaml`) is applied that permits
+   TCP connections to `host.docker.internal:8000`.
+2. The policy includes **`allowed_ips`** to whitelist the private IP range
+   that `host.docker.internal` resolves to — without this, OpenShell's
+   built-in SSRF protection blocks connections to RFC 1918 addresses.
+3. All traffic flows through the OpenShell **forward proxy**
+   (`10.200.0.1:3128`) which enforces the policy at the network level.
+
+No LLM is required — you test the skill directly with `python3` and `curl`
+from inside the sandbox.
 
 ```
-HOST                                   OPENSHELL SANDBOX (Docker)
-┌──────────────┐                       ┌─────────────────────┐
-│  app.py      │ ← HTTP (port 8000) ─ │  skill/main.py      │
-│  0.0.0.0:8000│                       │       ↑ run()       │
-│              │  host.docker.internal │                     │
-└──────────────┘                       └─────────────────────┘
+ HOST MACHINE (macOS / Linux)            OPENSHELL SANDBOX (Docker container: openshell-cluster-openshell)
+┌─────────────────────────────┐         ┌───────────────────────────────────────────────────────────────────┐
+│                             │         │                                                                   │
+│                             │         │   OpenClaw Agent (with LLM)          Direct (no LLM)              │
+│                             │         │   ┌─────────────────────┐           ┌──────────────────┐         │
+│                             │         │   │  openclaw gateway    │           │  sandbox shell    │         │
+│                             │         │   │  ws://127.0.0.1:18789│           │  (ssh session)    │         │
+│                             │         │   │                     │           │                  │         │
+│                             │         │   │  Agent receives     │           │  python3 -c      │         │
+│                             │         │   │  user prompt  ───►  │           │  "from main      │         │
+│                             │         │   │  LLM decides to     │           │   import run;    │         │
+│                             │         │   │  use bash tool ───► │           │   print(run(..)) │         │
+│                             │         │   └────────┬────────────┘           └────────┬─────────┘         │
+│                             │         │            │ bash: python3 main.py           │                    │
+│                             │         │            └──────────┬──────────────────────┘                    │
+│                             │         │                       ▼                                           │
+│   FastAPI App               │         │   /sandbox/.agents/skills/fastapi-skill/                          │
+│   ┌───────────────────┐    │         │   ┌───────────────────────┐                                      │
+│   │  app.py            │    │         │   │  main.py               │                                      │
+│   │                    │    │         │   │                        │                                      │
+│   │  GET  /hi          │    │  HTTP   │   │  run(action=...)       │                                      │
+│   │  GET  /hello/{name}│◄───┼─────────┼───│    _call_endpoint()    │                                      │
+│   │  GET  /foo         │    │         │   │    _health_check()     │                                      │
+│   │  POST /bar         │    │         │   │    _list_endpoints()   │                                      │
+│   │                    │    │         │   └───────────┬────────────┘                                      │
+│   │  uvicorn           │    │         │               │                                                   │
+│   │  0.0.0.0:8000      │    │         │               │ HTTP via http_proxy env var                       │
+│   └───────────────────┘    │         │               ▼                                                   │
+│            ▲                │         │   ┌────────────────────────────┐                                   │
+│            │                │         │   │  OpenShell Forward Proxy   │                                   │
+│            │                │         │   │  10.200.0.1:3128           │                                   │
+│            │                │         │   │                            │                                   │
+│            │                │         │   │  1. Match endpoint policy  │                                   │
+│            │                │         │   │  2. Check allowed_ips      │                                   │
+│            │                │         │   │  3. Verify binary path     │                                   │
+│            │                │         │   │  4. FORWARD to destination │                                   │
+│            │                │         │   └────────────┬───────────────┘                                   │
+│            │                │         │                │                                                   │
+│            │                │         │   ┌────────────▼───────────────┐                                   │
+│            │                │         │   │  DNS: host.docker.internal │                                   │
+│            │                │         │   │   → 192.168.65.254         │                                   │
+│            │                │         │   │  (Docker Desktop host IP)  │                                   │
+│            │                │         │   └────────────┬───────────────┘                                   │
+│            │                │         └────────────────┼───────────────────────────────────────────────────┘
+│            │                │                          │
+│            │  192.168.65.254:8000                      │
+│            └──────────────────────────────────────────┘
+│                             │
+└─────────────────────────────┘
+
+ POLICY ENFORCEMENT (openshell-policy.yaml)
+┌──────────────────────────────────────────────────────────┐
+│  network_policies:                                       │
+│    host_fastapi:                                         │
+│      endpoints:                                          │
+│        - host: host.docker.internal                      │
+│          port: 8000                                      │
+│          tls: skip              ← plain HTTP, no TLS     │
+│          allowed_ips:                                    │
+│            - "192.168.65.0/24"  ← bypasses SSRF block    │
+│      binaries:                                           │
+│        - { path: /** }          ← any executable allowed │
+└──────────────────────────────────────────────────────────┘
 ```
 
 > **Docs:** [docs.nvidia.com/openshell/latest](https://docs.nvidia.com/openshell/latest/)
@@ -205,12 +297,8 @@ Skills are discovered from `/sandbox/.agents/skills/` inside the container
 The skill directory doesn't exist by default — create it first, then copy.
 
 ```bash
-# Find the sandbox container ID
-# (OpenShell may name containers differently than the sandbox name)
-CID=$(docker ps --format '{{.ID}} {{.Names}}' | grep openshell | grep fastapi-demo | awk '{print $1}')
-
-# If the above is empty, list all containers and find it:
-#   docker ps --format '{{.ID}} {{.Names}}'
+# The sandbox runs inside the openshell-cluster-openshell container
+CID=$(docker ps --filter name=openshell-cluster-openshell --format '{{.ID}}')
 
 # Create the skills directory (doesn't exist by default)
 docker exec "$CID" mkdir -p /sandbox/.agents/skills
@@ -393,18 +481,22 @@ Expected POST response:
 {"status_code": 200, "response": {"you_sent": {"from": "openclaw-agent"}, "status": "ok"}}
 ```
 
-### 8.5 — Access the OpenClaw WebChat UI (optional)
+### 8.5 — OpenClaw WebChat UI (requires LLM — not used in this example)
 
-If you created the sandbox with `--forward 18789` (Step 2), the OpenClaw
-WebChat UI is available in your browser at:
+The `--forward 18789` flag (Step 2) forwards the OpenClaw WebChat port to
+`http://127.0.0.1:18789/` on the host. However, **the UI will not load**
+unless the OpenClaw gateway is fully running, which requires an LLM
+provider (e.g. Anthropic, OpenAI) configured via `openclaw onboard`.
+
+Without an LLM provider, the gateway never binds to port 18789. You'll see
+this in the logs:
 
 ```
-http://127.0.0.1:18789/
+direct-tcpip: failed to connect addr=127.0.0.1:18789 error=Connection refused
 ```
 
-From WebChat you can interact with the agent (requires an LLM provider
-configured via `openclaw onboard`). Without an LLM, use the sandbox shell
-as shown in 8.4 above.
+**This is expected for a no-LLM setup.** Use the sandbox shell as shown in
+8.4 above to exercise the skill directly.
 
 ```bash
 exit
@@ -499,20 +591,13 @@ lsof -i :8000
 If bound to `127.0.0.1`, edit `app.py` and change the `uvicorn.run` host
 to `0.0.0.0`.
 
-### Container ID not found with `docker ps --filter`
-
-OpenShell may name containers differently. List all and grep:
-
-```bash
-docker ps --format '{{.ID}} {{.Names}}' | grep openshell
-```
-
 ### `/sandbox/.agents/skills` doesn't exist
 
 The directory isn't created by default. Create it before copying:
 
 ```bash
-docker exec <container-id> mkdir -p /sandbox/.agents/skills
+CID=$(docker ps --filter name=openshell-cluster-openshell --format '{{.ID}}')
+docker exec "$CID" mkdir -p /sandbox/.agents/skills
 ```
 
 ### Skill files missing inside sandbox
