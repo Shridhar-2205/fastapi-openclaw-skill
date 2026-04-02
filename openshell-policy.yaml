@@ -1,5 +1,5 @@
 # OpenShell network policy — allows the sandbox to reach a FastAPI app
-# on the host machine (port 8000).
+# on the host machine (port 8000, plain HTTP).
 #
 # Apply with:
 #   openshell policy set <sandbox-name> --policy openshell-policy.yaml --wait
@@ -31,8 +31,8 @@ network_policies:
       - host: host.docker.internal
         port: 8000
         protocol: rest
+        tls: skip
         enforcement: enforce
         access: read-write
     binaries:
-      - { path: /usr/bin/python3 }
-      - { path: /usr/bin/curl }
+      - { path: /** }
