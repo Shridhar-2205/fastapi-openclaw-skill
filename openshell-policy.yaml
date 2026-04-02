@@ -4,11 +4,14 @@
 # Apply with:
 #   openshell policy set <sandbox-name> --policy openshell-policy.yaml --wait
 #
-# Hot-reloads without restarting the sandbox.
-#
 # Note: `openshell policy set` replaces the entire policy, so static
 # sections (filesystem_policy, landlock, process) must be included.
 # Ref: https://docs.nvidia.com/openshell/latest/reference/policy-schema.html
+#
+# We omit `protocol: rest` so the proxy uses TCP passthrough instead of
+# L7 HTTP inspection. The sandbox http_proxy uses FORWARD mode, but L7
+# rules require CONNECT tunneling — omitting `protocol` avoids the
+# "endpoint has L7 rules; use CONNECT" denial.
 
 version: 1
 
@@ -30,9 +33,7 @@ network_policies:
     endpoints:
       - host: host.docker.internal
         port: 8000
-        protocol: rest
         tls: skip
         enforcement: enforce
-        access: read-write
     binaries:
       - { path: /** }
