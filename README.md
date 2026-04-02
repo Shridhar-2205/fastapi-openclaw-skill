@@ -241,6 +241,23 @@ Key policy details:
   `host.docker.internal` resolves to a private IP (`192.168.65.254` on
   Docker Desktop). The proxy blocks RFC 1918 IPs by default as SSRF
   protection. See [private-ip-routing example](https://github.com/NVIDIA/OpenShell/tree/main/examples/private-ip-routing).
+
+> **Verify your IP:** The `allowed_ips` CIDR varies by Docker setup. To
+> find the correct value, connect to the sandbox and resolve the hostname:
+>
+> ```bash
+> openshell sandbox connect fastapi-demo
+> getent hosts host.docker.internal
+> # Example output: 192.168.65.254  host.docker.internal
+> exit
+> ```
+>
+> Common values:
+> - `192.168.65.0/24` — Docker Desktop (macOS / Windows)
+> - `172.17.0.0/16` — Docker Engine default bridge (Linux)
+> - `10.200.0.0/16` — OpenShell veth bridge
+>
+> Update `openshell-policy.yaml` if your IP doesn't fall in `192.168.65.0/24`.
 - **`tls: skip`** — disables TLS auto-detection for plain HTTP.
 - **No `protocol: rest`** — L7 HTTP inspection requires CONNECT tunneling,
   but the sandbox `http_proxy` uses FORWARD mode. Omitting `protocol` uses

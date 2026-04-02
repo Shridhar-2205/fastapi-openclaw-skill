@@ -39,6 +39,15 @@ network_policies:
         port: 8000
         tls: skip
         enforcement: enforce
+        # allowed_ips must match the private IP that host.docker.internal
+        # resolves to. This varies by Docker setup. To find yours, run:
+        #   openshell sandbox connect <name>
+        #   getent hosts host.docker.internal
+        # Common values:
+        #   192.168.65.0/24  — Docker Desktop (macOS/Windows)
+        #   172.17.0.0/16    — Docker Engine default bridge (Linux)
+        #   10.200.0.0/16    — OpenShell veth bridge
+        # Adjust the CIDR below to match your environment.
         allowed_ips:
           - "192.168.65.0/24"
     binaries:
