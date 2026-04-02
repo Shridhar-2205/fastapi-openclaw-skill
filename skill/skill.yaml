@@ -1,0 +1,12 @@
+name: fastapi-skill
+version: "1.0.0"
+description: Calls a FastAPI app running on the host machine
+author: user
+
+capabilities:
+  - tool-use
+  - network-access
+
+permissions:
+  - read-write
+  - network
