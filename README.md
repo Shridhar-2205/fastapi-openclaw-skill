@@ -16,6 +16,7 @@ HOST                                   OPENSHELL SANDBOX (Docker)
 > **Docs:** [docs.nvidia.com/openshell/latest](https://docs.nvidia.com/openshell/latest/)
 > — [Policy Schema](https://docs.nvidia.com/openshell/latest/reference/policy-schema.html)
 > — [First Network Policy tutorial](https://docs.nvidia.com/openshell/latest/tutorials/first-network-policy.html)
+> — [Private IP Routing](https://github.com/NVIDIA/OpenShell/tree/main/examples/private-ip-routing)
 
 ## Project Structure
 
@@ -129,8 +130,8 @@ curl -X POST http://localhost:8000/bar \
 ## Step 4 — Apply the Network Policy
 
 OpenShell sandboxes start with **default-deny networking** — all outbound
-connections are blocked. We need a policy that allows `python3` and `curl`
-inside the sandbox to reach `host.docker.internal:8000`.
+connections are blocked. We need a policy that allows the sandbox to reach
+`host.docker.internal:8000`.
 
 The included `openshell-policy.yaml` does exactly this. Apply it:
 
@@ -143,6 +144,16 @@ openshell policy set fastapi-demo --policy openshell-policy.yaml --wait
 - `policy set` **replaces the entire policy**, which is why the file
   includes `filesystem_policy`, `landlock`, and `process` sections too.
 
+Key policy details:
+- **`allowed_ips: ["192.168.65.0/24"]`** — required because
+  `host.docker.internal` resolves to a private IP (`192.168.65.254` on
+  Docker Desktop). The proxy blocks RFC 1918 IPs by default as SSRF
+  protection. See [private-ip-routing example](https://github.com/NVIDIA/OpenShell/tree/main/examples/private-ip-routing).
+- **`tls: skip`** — disables TLS auto-detection for plain HTTP.
+- **No `protocol: rest`** — L7 HTTP inspection requires CONNECT tunneling,
+  but the sandbox `http_proxy` uses FORWARD mode. Omitting `protocol` uses
+  TCP passthrough which is compatible.
+
 Verify the policy is active:
 
 ```bash
@@ -150,7 +161,7 @@ openshell policy get fastapi-demo
 ```
 
 You should see the `host_fastapi` network policy with
-`host: host.docker.internal`, `port: 8000`, `access: read-write`.
+`host: host.docker.internal`, `port: 8000`, `allowed_ips: 192.168.65.0/24`.
 
 ---
 
@@ -175,15 +186,12 @@ curl -s -X POST http://host.docker.internal:8000/bar \
 # {"you_sent":{"hello":"from sandbox"},"status":"ok"}
 ```
 
-If you get a `403` or `policy_denied` response, the policy wasn't applied.
-Check the deny log from the host:
+If you get a `403` or `policy_denied` response, check the deny log from
+the host (see Troubleshooting below):
 
 ```bash
 openshell logs fastapi-demo --level warn --since 5m
 ```
-
-Look for `action=deny` or `l7_decision=deny` entries. Re-apply the policy
-with `openshell policy set fastapi-demo --policy openshell-policy.yaml --wait`.
 
 Type `exit` to return to the host.
 
@@ -194,12 +202,21 @@ Type `exit` to return to the host.
 Skills are discovered from `/sandbox/.agents/skills/` inside the container
 ([base sandbox layout](https://github.com/NVIDIA/OpenShell-Community/tree/main/sandboxes/base)).
 
-```bash
-# Find the container ID
-docker ps --filter name=fastapi-demo --format '{{.ID}}'
+The skill directory doesn't exist by default — create it first, then copy.
 
-# Copy the skill directory into the sandbox
-docker cp skill/ <container-id>:/sandbox/.agents/skills/fastapi-skill
+```bash
+# Find the sandbox container ID
+# (OpenShell may name containers differently than the sandbox name)
+CID=$(docker ps --format '{{.ID}} {{.Names}}' | grep openshell | grep fastapi-demo | awk '{print $1}')
+
+# If the above is empty, list all containers and find it:
+#   docker ps --format '{{.ID}} {{.Names}}'
+
+# Create the skills directory (doesn't exist by default)
+docker exec "$CID" mkdir -p /sandbox/.agents/skills
+
+# Copy the skill into the sandbox
+docker cp skill/ "$CID":/sandbox/.agents/skills/fastapi-skill
 ```
 
 Verify the files are in place:
@@ -440,24 +457,37 @@ Environment variables set **inside the sandbox** override auto-detection:
 
 ## Troubleshooting
 
-### `curl: (56) Received HTTP code 403 from proxy after CONNECT`
+### `403 Forbidden` from proxy
 
-The sandbox proxy blocked the request. No network policy matches.
+Check the deny logs **from the host** (not inside the sandbox):
 
 ```bash
-# Re-apply the policy
-openshell policy set fastapi-demo --policy openshell-policy.yaml --wait
-
-# Check deny logs
 openshell logs fastapi-demo --level warn --since 5m
-# Look for: action=deny dst_host=host.docker.internal dst_port=8000
 ```
 
-### `l7_decision=deny` in logs
+Common deny reasons:
 
-The connection was allowed but the HTTP method was blocked by L7 inspection.
-The policy uses `access: read-write` which permits GET, HEAD, OPTIONS, POST,
-PUT, PATCH. DELETE is not included — change to `access: full` if needed.
+#### `reason=endpoint has L7 rules; use CONNECT`
+
+You have `protocol: rest` in your policy. The sandbox `http_proxy` uses
+FORWARD mode, which is incompatible with L7 inspection. **Remove
+`protocol: rest`** from the endpoint (TCP passthrough works).
+
+#### `FORWARD blocked: internal IP without allowed_ips`
+
+`host.docker.internal` resolves to a private RFC 1918 address
+(`192.168.65.254` on Docker Desktop). The proxy blocks private IPs by
+default. **Add `allowed_ips: ["192.168.65.0/24"]`** to the endpoint.
+See [private-ip-routing example](https://github.com/NVIDIA/OpenShell/tree/main/examples/private-ip-routing).
+
+#### Generic `action=deny`
+
+The endpoint/port/binary doesn't match any policy entry. Re-apply:
+
+```bash
+openshell policy set fastapi-demo --policy openshell-policy.yaml --wait
+openshell policy get fastapi-demo
+```
 
 ### FastAPI app not reachable from host
 
@@ -468,6 +498,22 @@ lsof -i :8000
 
 If bound to `127.0.0.1`, edit `app.py` and change the `uvicorn.run` host
 to `0.0.0.0`.
+
+### Container ID not found with `docker ps --filter`
+
+OpenShell may name containers differently. List all and grep:
+
+```bash
+docker ps --format '{{.ID}} {{.Names}}' | grep openshell
+```
+
+### `/sandbox/.agents/skills` doesn't exist
+
+The directory isn't created by default. Create it before copying:
+
+```bash
+docker exec <container-id> mkdir -p /sandbox/.agents/skills
+```
 
 ### Skill files missing inside sandbox
 
